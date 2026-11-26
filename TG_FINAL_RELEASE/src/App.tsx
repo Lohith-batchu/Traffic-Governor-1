@@ -271,7 +271,7 @@ type SimulationDecision = (typeof baseLogs)[number] & {
 const HISTORY_KEY = "trafficgovernor_demo_history";
 function readHistory(): SimulationDecision[] {
   try {
-    const value: unknown = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+    const value: unknown = JSON.parse(sessionStorage.getItem(HISTORY_KEY) || "[]");
     if (!Array.isArray(value)) return [];
     return value.filter((item): item is SimulationDecision =>
       item && typeof item === "object" && typeof item.client === "string" &&
@@ -1675,13 +1675,18 @@ export default function App() {
   const [policyLoaded, setPolicyLoaded] = useState(false);
   const [startupReady, setStartupReady] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const generationRef = useRef<string | undefined>(undefined);
+  const initializedGeneration = useRef<string | undefined>(undefined);
   const refreshInFlight = useRef<Promise<boolean> | null>(null);
   useEffect(() => {
     try { localStorage.setItem("trafficgovernor_theme", theme); }
     catch { /* Theme remains usable for the current session. */ }
   }, [theme]);
   // In-memory records of requests actually sent during this page session.
-  const [history, setHistory] = useState<SimulationDecision[]>([]);
+  const [history, setHistory] = useState<SimulationDecision[]>(readHistory);
+  useEffect(() => {
+    try { sessionStorage.setItem(HISTORY_KEY, JSON.stringify(history)); } catch { /* optional storage */ }
+  }, [history]);
   const recordSimulation = (items: SimulationDecision[]) => {
     setHistory(previous => [...previous, ...items].slice(-5000));
     window.setTimeout(() => { void refreshServerMetrics(); }, 0);
@@ -1702,7 +1707,7 @@ export default function App() {
     [notificationsOpen, setNotificationsOpen] = useState(false),
     [notifications, setNotifications] = useState<DemoNotification[]>(() => {
       try {
-        const value = JSON.parse(localStorage.getItem(NOTIFICATION_STORAGE_KEY) || "[]");
+        const value = JSON.parse(sessionStorage.getItem(NOTIFICATION_STORAGE_KEY) || "[]");
         if (!Array.isArray(value)) return [];
         return value.filter((n) => n && typeof n.id === "string" && typeof n.title === "string" && typeof n.description === "string" && typeof n.createdAt === "number" && typeof n.read === "boolean" && ["policy", "limit", "simulation"].includes(n.kind)).slice(0, 40);
       } catch { return []; }
@@ -1723,6 +1728,18 @@ export default function App() {
   async function fetchServerMetrics(): Promise<boolean> {
     try {
       const data = await getMetrics();
+      if (!data.session_generation) throw new Error("Session-aware backend not ready");
+      let oldGeneration = generationRef.current;
+      try { oldGeneration = oldGeneration ?? sessionStorage.getItem("tg_generation") ?? undefined; } catch { /* optional storage */ }
+      if (oldGeneration && oldGeneration !== data.session_generation) {
+        setHistory([]);
+        setNotifications([]);
+        setStartupReady(false);
+        setRoleReady(false);
+        setPolicyLoaded(false);
+      }
+      generationRef.current = data.session_generation;
+      try { sessionStorage.setItem("tg_generation", data.session_generation); } catch { /* optional storage */ }
       setLiveMetrics(data);
       setMetricsError(false);
       try {
@@ -1770,13 +1787,14 @@ export default function App() {
           setRetrying(true);
           setRoleReady(false);
           setPolicyLoaded(false);
-        } else if (!initialized) {
+        } else if (!initialized || initializedGeneration.current !== generationRef.current) {
           const [current, backendRole] = await Promise.all([getPolicy(), getRole()]);
           if (!mounted) return;
           setPolicy(fromBackendPolicy(current));
           setPolicyLoaded(true);
           setRole(backendRole === "network_ops" ? "ops" : "engineer");
           setRoleReady(true);
+          initializedGeneration.current = generationRef.current;
           initialized = true;
           setStartupReady(true);
           setRetrying(false);
@@ -1821,7 +1839,7 @@ export default function App() {
     if (roleReady && role === "ops" && page === "Policy Settings") setPage("Dashboard");
   }, [roleReady, role, page]);
   useEffect(() => {
-    try { localStorage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify(notifications)); }
+    try { sessionStorage.setItem(NOTIFICATION_STORAGE_KEY, JSON.stringify(notifications)); }
     catch { /* The demo works in-memory when browser storage is unavailable. */ }
   }, [notifications]);
   const addEvent = (kind: DemoNotification["kind"], title: string, description: string) => {

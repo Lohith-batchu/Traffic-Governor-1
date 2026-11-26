@@ -3,6 +3,8 @@
 from http.server import HTTPServer,BaseHTTPRequestHandler
 # Importing urlparse to separate the URL path and query parameters
 import os
+import uuid
+import re
 from urllib.parse import urlparse, parse_qs  # parse qs will saperate the url into parts
 # Support running as a script and importing in automated integration tests.
 if __package__:
@@ -17,51 +19,62 @@ from datetime import datetime, timezone
 from collections import deque
 import math
 import time
-clients = {}
+# Each browser session owns its own counters, policies and limiter state.
+SESSION_TTL = 30 * 60
+MAX_SESSIONS = 32
+MAX_SESSION_REQUESTS = 10000
+sessions = {}
+
+class SessionState:
+    def __init__(self):
+        self.last_seen = time.monotonic()
+        self.generation = uuid.uuid4().hex
+        self.clients = {}
 
 
-# Dictionary to store API request statistics
-metrics = {
-    "total": 0,      #Total
-    "allowed": 0,    # allowed
-    "denied": 0      # rejected
-}
-# Store EVERY valid /check decision since this server process started.
-# This list is reset on server restart. /logs exposes paginated history.
-request_logs = []
+        # Dictionary to store API request statistics
+        self.metrics = {
+            "total": 0,      #Total
+            "allowed": 0,    # allowed
+            "denied": 0      # rejected
+        }
+        # Store EVERY valid /check decision since this server process started.
+        # This list is reset on server restart. /logs exposes paginated history.
+        self.request_logs = []
 
-# Store the processing time of the latest 100 requests
-# Each value will be measured in milliseconds
-latency_samples = deque(maxlen=100)
-# Store total latency and request count for each minute
-latency_by_minute = {}
+        # Store the processing time of the latest 100 requests
+        # Each value will be measured in milliseconds
+        self.latency_samples = deque(maxlen=100)
+        # Store total latency and request count for each minute
+        self.latency_by_minute = {}
 
-# Store how many API requests arrive in each minute
-# Key = minute number, value = request count
-request_volume = {}
-
-
-# Store separate request statistics for each API client
-# Key = client ID, value = that client's request counters
-client_metrics = {}
-# Current role used for the local demo
-current_role = "infrastructure_engineer"
+        # Store how many API requests arrive in each minute
+        # Key = minute number, value = request count
+        self.request_volume = {}
 
 
-# Keep both algorithms' settings so switching back preserves the values.
-# These settings are in memory and reset when the Python server restarts.
-policy = {
-    "algorithm": "token_bucket",
-    "capacity": 3,
-    "refill_rate": 1,
-    "window_limit": 3,
-    "window_seconds": 10
-}
+        # Store separate request statistics for each API client
+        # Key = client ID, value = that client's request counters
+        self.client_metrics = {}
+        # Current role used for the local demo
+        self.current_role = "infrastructure_engineer"
 
-# A Sliding Window limiter holds separate accepted-request histories per client.
-sliding_limiter = SlidingWindowLimiter(
-    policy["window_limit"], policy["window_seconds"]
-)
+
+        # Keep both algorithms' settings so switching back preserves the values.
+        # These settings are in memory and reset when the Python server restarts.
+        self.policy = {
+            "algorithm": "token_bucket",
+            "capacity": 3,
+            "refill_rate": 1,
+            "window_limit": 3,
+            "window_seconds": 10
+        }
+
+        # A Sliding Window limiter holds separate accepted-request histories per client.
+        self.sliding_limiter = SlidingWindowLimiter(
+            self.policy["window_limit"], self.policy["window_seconds"]
+        )
+
 
 ALLOWED_ORIGINS = {
     "http://127.0.0.1:5501",
@@ -72,16 +85,47 @@ ALLOWED_ORIGINS = {
 }
 
 class TrafficGovernorServer(BaseHTTPRequestHandler):
+    def session_error(self, status, message):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": message}).encode())
+
+    def select_session(self):
+        now = time.monotonic()
+        for key, state in list(sessions.items()):
+            if now - state.last_seen >= SESSION_TTL:
+                del sessions[key]
+        session_id = self.headers.get("X-TG-Session")
+        # Render health checks must not create or access visitor sessions.
+        if session_id is None and self.command == "GET" and urlparse(self.path).path == "/metrics":
+            self.state = SessionState()
+            return True
+        if not session_id or not re.fullmatch(r"[0-9a-f]{32}", session_id):
+            self.session_error(400, "Valid X-TG-Session header required")
+            return False
+        if session_id not in sessions:
+            if len(sessions) >= MAX_SESSIONS:
+                self.session_error(503, "Demo session capacity reached; retry later")
+                return False
+            sessions[session_id] = SessionState()
+        self.state = sessions[session_id]
+        self.state.last_seen = now
+        return True
+
     def end_headers(self):
         origin = self.headers.get("Origin")
 
         if origin in ALLOWED_ORIGINS:
             self.send_header("Access-Control-Allow-Origin", origin)
 
-        self.send_header("Vary", "Origin")
+        self.send_header("Vary", "Origin, X-TG-Session")
+        self.send_header("Cache-Control", "no-store")
         super().end_headers()
         
     def do_GET(self):
+        if not self.select_session():
+            return
         # Record when the HTTP request begins processing
         request_started_at = time.perf_counter()
         # Print the requested URL in the Python terminal
@@ -90,7 +134,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         # Return the currently selected demo role
         if url.path == "/role":
-            response = {"role": current_role}
+            response = {"role": self.state.current_role}
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -112,7 +156,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
         if url.path == "/policy":
 
             # Convert the policy dictionary into JSON
-            message = json.dumps(policy)
+            message = json.dumps(self.state.policy)
 
             # Send HTTP 200 because the request succeeded
             self.send_response(200)
@@ -145,10 +189,10 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"error": "offset must be >= 0 and limit 1..200"}).encode())
                 return
 
-            total = len(request_logs)
+            total = len(self.state.request_logs)
             end = max(0, total - offset)
             start = max(0, end - limit)
-            page = list(reversed(request_logs[start:end]))
+            page = list(reversed(self.state.request_logs[start:end]))
             result = {
                 "total": total,
                 "offset": offset,
@@ -165,21 +209,22 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 # Handle requests to the /metrics endpoint
         if url.path == "/metrics":
 
-            if metrics["total"] == 0:
+            if self.state.metrics["total"] == 0:
                 deny_rate = 0
 
             else:
                 # Calculate the percentage of denied requests
-                deny_rate = (metrics["denied"] / metrics["total"]) * 100
+                deny_rate = (self.state.metrics["denied"] / self.state.metrics["total"]) * 100
 
             # Store the deny rate for both cases
-            metrics["deny_rate"] = round(deny_rate, 2)
+            self.state.metrics["deny_rate"] = round(deny_rate, 2)
 
 
             # Convert the metrics dictionary into a JSON string
 
             # Create a copy of the metrics dictionary
-            response_data = metrics.copy()
+            response_data = self.state.metrics.copy()
+            response_data["session_generation"] = self.state.generation
 
 
             # Get the current minute
@@ -193,7 +238,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
                 label = time.strftime("%H:%M", time.localtime(minute * 60))
 
                 # Get the request count for this minute
-                count = request_volume.get(minute, 0)
+                count = self.state.request_volume.get(minute, 0)
 
                 # Add this interval to the API response
                 response_data["volume"].append({
@@ -203,18 +248,18 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
 
             # Display which algorithm generated the live request metrics.
-            response_data["active_algorithm"] = policy["algorithm"]
+            response_data["active_algorithm"] = self.state.policy["algorithm"]
 
             # Keep /metrics lightweight for frequent live refreshes.
             # Use GET /logs to retrieve ALL decisions since startup.
-            response_data["logs"] = request_logs[-20:]
-            response_data["log_total"] = len(request_logs)
+            response_data["logs"] = self.state.request_logs[-20:]
+            response_data["log_total"] = len(self.state.request_logs)
 
             # Create a dictionary for client statistics in the API response
             response_data["clients"] = {}
 
             # Go through each client's stored statistics
-            for client_id, stats in client_metrics.items():
+            for client_id, stats in self.state.client_metrics.items():
 
                 # Get the total requests from this client
                 total = stats["total"]
@@ -231,7 +276,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
             # Calculate average and P95 latency from recent requests
             # Sort the recorded latency values from smallest to largest
-            samples = sorted(latency_samples)
+            samples = sorted(self.state.latency_samples)
 
             # Check whether any requests have been measured
             if samples:
@@ -270,7 +315,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             for minute in range(current_minute - 5, current_minute + 1):
 
                 # Get recorded latency information for this minute
-                record = latency_by_minute.get(minute)
+                record = self.state.latency_by_minute.get(minute)
 
                 # Calculate average latency if requests were recorded
                 if record and record["count"] > 0:
@@ -296,9 +341,9 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             response_data["latency"] = latency_chart
 
             # Remove old minute records to avoid unlimited memory growth
-            for minute in list(latency_by_minute):
+            for minute in list(self.state.latency_by_minute):
                 if minute < current_minute - 5:
-                    del latency_by_minute[minute]
+                    del self.state.latency_by_minute[minute]
 
 
             # Convert the complete response into JSON
@@ -321,6 +366,9 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
         # Check whether the request is for /check
         if url.path == "/check":
+            if self.state.metrics["total"] >= MAX_SESSION_REQUESTS:
+                self.session_error(503, "Demo session request limit reached; open a new tab")
+                return
 
 
             parameters = parse_qs(url.query)
@@ -350,21 +398,21 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             print("Valid Client ID:", client_id)
 
 
-            if policy["algorithm"] == "sliding_window":
+            if self.state.policy["algorithm"] == "sliding_window":
                 # One limiter tracks independent histories for each client.
-                decision = sliding_limiter.allow(client_id)
+                decision = self.state.sliding_limiter.allow(client_id)
                 allowed = decision["allowed"]
                 remaining = decision["remaining"]
                 retry_after_ms = decision["retry_after_ms"]
                 tokens_remaining = None  # Sliding Window has no tokens.
             else:
                 # Token Bucket continues to use one bucket per client.
-                if client_id not in clients:
-                    clients[client_id] = TokenBucket(
-                        policy["capacity"], policy["refill_rate"]
+                if client_id not in self.state.clients:
+                    self.state.clients[client_id] = TokenBucket(
+                        self.state.policy["capacity"], self.state.policy["refill_rate"]
                     )
 
-                bucket = clients[client_id]
+                bucket = self.state.clients[client_id]
                 allowed = bucket.allow_request()
                 tokens_remaining = round(bucket.tokens, 2)
                 remaining = tokens_remaining
@@ -384,42 +432,42 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             # Count every valid request checked by the selected algorithm
 
 # Check whether this client already has stored statistics
-            if client_id not in client_metrics:
+            if client_id not in self.state.client_metrics:
 
                 # Create separate counters for a new client
-                client_metrics[client_id] = {
+                self.state.client_metrics[client_id] = {
                     "total": 0,
                     "allowed": 0,
                     "denied": 0
 
                 }
 
-            metrics["total"] += 1
+            self.state.metrics["total"] += 1
 
             # Get the current minute using the system clock
             current_minute = int(time.time() // 60)
 
             # Increase the number of requests recorded in this minute
-            request_volume[current_minute] = request_volume.get(current_minute, 0) + 1
+            self.state.request_volume[current_minute] = self.state.request_volume.get(current_minute, 0) + 1
 
             # Keep only the most recent six minutes of chart data
-            for minute in list(request_volume):
+            for minute in list(self.state.request_volume):
                 if minute < current_minute - 5:
-                    del request_volume[minute]
+                    del self.state.request_volume[minute]
 
             # Increase the request count for this specific client
-            client_metrics[client_id]["total"] += 1
+            self.state.client_metrics[client_id]["total"] += 1
 
             # Update the allowed or denied counter
             if allowed:
-                metrics["allowed"] += 1
-                client_metrics[client_id]["allowed"] += 1
+                self.state.metrics["allowed"] += 1
+                self.state.client_metrics[client_id]["allowed"] += 1
             else:
-                metrics["denied"] += 1
-                client_metrics[client_id]["denied"] += 1
+                self.state.metrics["denied"] += 1
+                self.state.client_metrics[client_id]["denied"] += 1
 
             # Display updated statistics in the Python terminal
-            print("Updated metrics:", metrics)
+            print("Updated metrics:", self.state.metrics)
 
 
 
@@ -443,7 +491,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
                 "decision": "ALLOWED" if allowed else "DENIED",
                 "status": status,
                 "message": message,
-                "algorithm": policy["algorithm"],
+                "algorithm": self.state.policy["algorithm"],
                 "remaining": remaining,
                 "tokens_remaining": tokens_remaining,
                 "retry_after_ms": retry_after_ms
@@ -461,14 +509,14 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
             # Record this decision with a sequential ID and timestamp.
             # Save it AFTER timing so individual history rows show real latency.
-            request_logs.append({
-                "id": metrics["total"],
+            self.state.request_logs.append({
+                "id": self.state.metrics["total"],
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
                 "client_id": client_id,
                 "endpoint": "/check",
                 "decision": "ALLOWED" if allowed else "DENIED",
                 "status": status,
-                "algorithm": policy["algorithm"],
+                "algorithm": self.state.policy["algorithm"],
                 "latency_ms": round(elapsed_ms, 2),
                 "remaining": remaining,
                 "tokens_remaining": tokens_remaining,
@@ -476,23 +524,23 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             })
 
             # Save the value for later analysis
-            latency_samples.append(round(elapsed_ms, 2))
+            self.state.latency_samples.append(round(elapsed_ms, 2))
 
             # Identify the current minute using the system clock
             minute_key = int(time.time() // 60)
 
             # Create a record if this minute has no latency data yet
-            if minute_key not in latency_by_minute:
-                latency_by_minute[minute_key] = {
+            if minute_key not in self.state.latency_by_minute:
+                self.state.latency_by_minute[minute_key] = {
                     "total_ms": 0.0,
                     "count": 0
                 }
 
             # Add this request's processing time
-            latency_by_minute[minute_key]["total_ms"] += elapsed_ms
+            self.state.latency_by_minute[minute_key]["total_ms"] += elapsed_ms
 
             # Increase the number of measured requests
-            latency_by_minute[minute_key]["count"] += 1
+            self.state.latency_by_minute[minute_key]["count"] += 1
 
 
             # Send the calculated HTTP status to the client
@@ -536,8 +584,9 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
 
     def do_POST(self):
+        if not self.select_session():
+            return
         # Save the selected algorithm and its settings at /policy.
-        global sliding_limiter,current_role
         url = urlparse(self.path)
 
 
@@ -583,14 +632,14 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
                 return
 
             # Save the chosen demo role
-            current_role = new_role
+            self.state.current_role = new_role
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
 
             self.wfile.write(
-                json.dumps({"role": current_role}).encode()
+                json.dumps({"role": self.state.current_role}).encode()
             )
             return
 
@@ -634,7 +683,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
                 return
 
             # Check whether the client exists
-            if client_id not in client_metrics:
+            if client_id not in self.state.client_metrics:
                 self.send_response(404)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -644,7 +693,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
                 return
 
             # Reset only this client's statistics
-            client_metrics[client_id].update({
+            self.state.client_metrics[client_id].update({
                 "total": 0,
                 "allowed": 0,
                 "denied": 0,
@@ -657,7 +706,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             response = {
                 "message": "Client metrics reset",
                 "client_id": client_id,
-                "stats": client_metrics[client_id].copy()
+                "stats": self.state.client_metrics[client_id].copy()
             }
 
             self.send_response(200)
@@ -671,7 +720,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             return
 
         # US-06: Prevent Network Ops from editing policies
-        if current_role == "network_ops":
+        if self.state.current_role == "network_ops":
             response = {
                 "error": "Unauthorized: Network Ops cannot edit policies"
             }
@@ -693,17 +742,17 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
                 raise ValueError("Expected a JSON object")
 
             # Existing Token Bucket clients without 'algorithm' still work.
-            algorithm = data.get("algorithm", policy["algorithm"])
+            algorithm = data.get("algorithm", self.state.policy["algorithm"])
             if algorithm not in ("token_bucket", "sliding_window"):
                 raise ValueError("Unsupported algorithm")
 
             # Start with current values; validate the active algorithm.
-            updated = policy.copy()
+            updated = self.state.policy.copy()
             updated["algorithm"] = algorithm
 
             if algorithm == "token_bucket":
-                capacity = data.get("capacity", policy["capacity"])
-                refill_rate = data.get("refill_rate", policy["refill_rate"])
+                capacity = data.get("capacity", self.state.policy["capacity"])
+                refill_rate = data.get("refill_rate", self.state.policy["refill_rate"])
                 if type(capacity) is not int or not 1 <= capacity <= 10000:
                     raise ValueError("Invalid capacity")
                 if (type(refill_rate) not in (int, float)
@@ -713,8 +762,8 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
                 updated["capacity"] = capacity
                 updated["refill_rate"] = refill_rate
             else:
-                window_limit = data.get("window_limit", policy["window_limit"])
-                window_seconds = data.get("window_seconds", policy["window_seconds"])
+                window_limit = data.get("window_limit", self.state.policy["window_limit"])
+                window_seconds = data.get("window_seconds", self.state.policy["window_seconds"])
                 if type(window_limit) is not int or not 1 <= window_limit <= 10000:
                     raise ValueError("Invalid window limit")
                 if type(window_seconds) is not int or not 1 <= window_seconds <= 86400:
@@ -731,13 +780,13 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             return
 
         # Apply changes together. Reset limiter histories, not cumulative metrics.
-        policy.update(updated)
-        clients.clear()
-        sliding_limiter = SlidingWindowLimiter(
-            policy["window_limit"], policy["window_seconds"]
+        self.state.policy.update(updated)
+        self.state.clients.clear()
+        self.state.sliding_limiter = SlidingWindowLimiter(
+            self.state.policy["window_limit"], self.state.policy["window_seconds"]
         )
 
-        message = json.dumps(policy)
+        message = json.dumps(self.state.policy)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -750,7 +799,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
         url = urlparse(self.path)
 
         # Support preflight for endpoints that accept POST requests
-        if url.path not in ("/policy", "/metrics/reset","/role"):
+        if url.path not in ("/policy", "/metrics/reset", "/role", "/metrics", "/logs", "/check"):
             self.send_error(404, "Endpoint Not Found")
             return
 
@@ -766,7 +815,7 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
         # Allow the frontend to send JSON content
         self.send_header(
             "Access-Control-Allow-Headers",
-            "Content-Type"
+            "Content-Type, X-TG-Session"
         )
 
         # Finish HTTP response headers

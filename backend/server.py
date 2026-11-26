@@ -2,7 +2,7 @@
 # BaseHTTPRequestHandler — allows us to handle requests and send responses.
 from http.server import HTTPServer,BaseHTTPRequestHandler
 # Importing urlparse to separate the URL path and query parameters
-
+import os
 from urllib.parse import urlparse, parse_qs  # parse qs will saperate the url into parts
 # Support running as a script and importing in automated integration tests.
 if __package__:
@@ -63,10 +63,24 @@ sliding_limiter = SlidingWindowLimiter(
     policy["window_limit"], policy["window_seconds"]
 )
 
-
+ALLOWED_ORIGINS = {
+    "http://127.0.0.1:5501",
+    "http://127.0.0.1:5173",
+    "http://localhost:5173",
+    "http://localhost:5501",
+    "https://traffic-governor.vercel.app"
+}
 
 class TrafficGovernorServer(BaseHTTPRequestHandler):
+    def end_headers(self):
+        origin = self.headers.get("Origin")
 
+        if origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+
+        self.send_header("Vary", "Origin")
+        super().end_headers()
+        
     def do_GET(self):
         # Record when the HTTP request begins processing
         request_started_at = time.perf_counter()
@@ -80,10 +94,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "http://127.0.0.1:5173"
-            )
             self.end_headers()
 
             self.wfile.write(json.dumps(response).encode())
@@ -110,12 +120,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             # Inform the browser that the response contains JSON
             self.send_header("Content-Type", "application/json")
 
-            # Allow our frontend to read the response
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "http://127.0.0.1:5501"
-            )
-
             # Finish sending the HTTP headers
             self.end_headers()
 
@@ -137,7 +141,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             except (ValueError, TypeError):
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5501")
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": "offset must be >= 0 and limit 1..200"}).encode())
                 return
@@ -155,7 +158,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             }
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5501")
             self.end_headers()
             self.wfile.write(json.dumps(result).encode())
             return
@@ -307,7 +309,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             # Tells the client that the response contains JSON typ of content
             self.send_header("Content-Type", "application/json")
 
-            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5501")
 
 
             self.end_headers()
@@ -512,10 +513,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
 
             # Finish HTTP headers
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "http://127.0.0.1:5501"
-            )
 
             self.end_headers()
 
@@ -528,14 +525,8 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
         # Handle requests to other endpoints
         self.send_response(404)
 
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            "http://127.0.0.1:5501"
-        )
 
         self.send_header("Content-Type", "text/plain")
-
-        # Allow our local frontend to read the rate-limit response
 
         self.end_headers()
 
@@ -584,10 +575,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             ):
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
-                self.send_header(
-                    "Access-Control-Allow-Origin",
-                    "http://127.0.0.1:5501"
-                )
                 self.end_headers()
 
                 self.wfile.write(
@@ -600,10 +587,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "http://127.0.0.1:5501"
-            )
             self.end_headers()
 
             self.wfile.write(
@@ -644,10 +627,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             except (ValueError, TypeError, UnicodeDecodeError, OverflowError):
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
-                self.send_header(
-                    "Access-Control-Allow-Origin",
-                    "http://127.0.0.1:5501"
-                )
                 self.end_headers()
                 self.wfile.write(
                     json.dumps({"error": "Invalid client ID"}).encode()
@@ -658,10 +637,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             if client_id not in client_metrics:
                 self.send_response(404)
                 self.send_header("Content-Type", "application/json")
-                self.send_header(
-                    "Access-Control-Allow-Origin",
-                    "http://127.0.0.1:5501"
-                )
                 self.end_headers()
                 self.wfile.write(
                     json.dumps({"error": "Client not found"}).encode()
@@ -687,10 +662,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "http://127.0.0.1:5501"
-            )
             self.end_headers()
             self.wfile.write(json.dumps(response).encode())
             return
@@ -707,10 +678,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
             self.send_response(403)
             self.send_header("Content-Type", "application/json")
-            self.send_header(
-                "Access-Control-Allow-Origin",
-                "http://127.0.0.1:5501"
-            )
             self.end_headers()
 
             self.wfile.write(json.dumps(response).encode())
@@ -759,7 +726,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
             # Invalid input must never change the existing policy.
             self.send_response(400)
             self.send_header("Content-Type", "text/plain")
-            self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5501")
             self.end_headers()
             self.wfile.write(b"Invalid policy settings")
             return
@@ -774,7 +740,6 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
         message = json.dumps(policy)
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "http://127.0.0.1:5501")
         self.end_headers()
         self.wfile.write(message.encode())
 
@@ -784,19 +749,13 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
         # Identify the requested endpoint
         url = urlparse(self.path)
 
-        # Only support preflight for the policy endpoint
+        # Support preflight for endpoints that accept POST requests
         if url.path not in ("/policy", "/metrics/reset","/role"):
             self.send_error(404, "Endpoint Not Found")
             return
 
         # No Content means the preflight was successful
         self.send_response(204)
-
-        # Allow requests from our frontend
-        self.send_header(
-            "Access-Control-Allow-Origin",
-            "http://127.0.0.1:5501"
-        )
 
         # Tell the browser which HTTP methods are permitted
         self.send_header(
@@ -815,7 +774,9 @@ class TrafficGovernorServer(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = HTTPServer(("127.0.0.1", 5001), TrafficGovernorServer)
-    print("TrafficGovernor server started on http://127.0.0.1:5001")
+    port = int(os.environ.get("PORT", 5001))
+    host = "0.0.0.0" if "PORT" in os.environ else "127.0.0.1"
+    server = HTTPServer((host, port), TrafficGovernorServer)
+    print(f"TrafficGovernor server started on port {port}")
     server.serve_forever()
 

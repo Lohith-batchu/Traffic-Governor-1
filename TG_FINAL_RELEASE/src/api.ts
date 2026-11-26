@@ -1,9 +1,5 @@
-
-/** TrafficGovernor API client.
- * Uses the Vite proxy locally and the deployed backend in production.
- */
-
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "/backend";
+/** TrafficGovernor API client: Vite proxy locally, cloud URL in production. */
+const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/backend").replace(/\/+$/, "");
 
 export type BackendPolicy = {
   algorithm: "token_bucket" | "sliding_window";
@@ -12,9 +8,7 @@ export type BackendPolicy = {
   window_limit: number;
   window_seconds: number;
 };
-
 export type BackendRole = "infrastructure_engineer" | "network_ops";
-
 export type BackendLog = {
   id?: number;
   timestamp: string;
@@ -28,7 +22,6 @@ export type BackendLog = {
   tokens_remaining?: number | null;
   retry_after_ms?: number | null;
 };
-
 export type ClientMetrics = {
   total: number;
   allowed: number;
@@ -36,7 +29,6 @@ export type ClientMetrics = {
   deny_rate?: number;
   last_reset_at?: string;
 };
-
 export type MetricsResponse = {
   total: number;
   allowed: number;
@@ -51,7 +43,6 @@ export type MetricsResponse = {
   logs?: BackendLog[];
   log_total?: number;
 };
-
 export type LogsResponse = {
   total: number;
   offset: number;
@@ -59,7 +50,6 @@ export type LogsResponse = {
   has_more: boolean;
   logs: BackendLog[];
 };
-
 export type CheckResponse = {
   client_id: string;
   allowed: boolean;
@@ -71,118 +61,63 @@ export type CheckResponse = {
   retry_after_ms?: number | null;
 };
 
-async function apiJson<T>(
-  path: string,
-  init?: RequestInit
-): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    cache: "no-store",
-    ...init,
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    let detail = body.slice(0, 160);
-
-    try {
-      const parsed = JSON.parse(body);
-      detail = parsed.error || parsed.message || detail;
-    } catch {
-      /* A plain text error response is also valid. */
+// Allow enough time for a cold start, including reading the response body.
+async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 90000);
+  try {
+    const response = await fetch(`${API_BASE}${path}`, {
+      cache: "no-store", ...init, signal: controller.signal,
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      let detail = body.slice(0, 160);
+      try {
+        const parsed = JSON.parse(body);
+        detail = parsed.error || parsed.message || detail;
+      } catch { /* Plain text errors are valid too. */ }
+      throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
     }
-
-    throw new Error(
-      `HTTP ${response.status}${detail ? `: ${detail}` : ""}`
-    );
+    return (await response.json()) as T;
+  } finally {
+    window.clearTimeout(timer);
   }
-
-  return (await response.json()) as T;
 }
-
-export const getMetrics = () =>
-  apiJson<MetricsResponse>("/metrics");
-
-export const getPolicy = () =>
-  apiJson<BackendPolicy>("/policy");
-
+export const getMetrics = () => apiJson<MetricsResponse>("/metrics");
+export const getPolicy = () => apiJson<BackendPolicy>("/policy");
 export const getLogs = (offset = 0, limit = 100) =>
-  apiJson<LogsResponse>(
-    `/logs?offset=${offset}&limit=${limit}`
-  );
-
+  apiJson<LogsResponse>(`/logs?offset=${offset}&limit=${limit}`);
 export const getRole = async () => {
   const data = await apiJson<{ role: BackendRole }>("/role");
   return data.role;
 };
-
-export const savePolicy = (
-  data: Partial<BackendPolicy> & Pick<BackendPolicy, "algorithm">
-) =>
+export const savePolicy = (data: Partial<BackendPolicy> & Pick<BackendPolicy, "algorithm">) =>
   apiJson<BackendPolicy>("/policy", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
   });
-
 export const setBackendRole = async (role: BackendRole) => {
   const result = await apiJson<{ role: BackendRole }>("/role", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ role }),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role }),
   });
-
   return result.role;
 };
-
 export const resetClientMetrics = (client_id: string) =>
   apiJson<{ message: string }>("/metrics/reset", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_id }),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ client_id }),
   });
 
 /** A 429 is a normal limiter decision, not a network error. */
-
-export async function checkRequest(
-  clientId: string
-): Promise<CheckResponse> {
-  const response = await fetch(
-    `${API_BASE}/check?client_id=${encodeURIComponent(clientId)}`,
-    {
-      cache: "no-store",
-    }
-  );
-
+export async function checkRequest(clientId: string): Promise<CheckResponse> {
+  const response = await fetch(`${API_BASE}/check?client_id=${encodeURIComponent(clientId)}`, { cache: "no-store" });
   if (response.status !== 200 && response.status !== 429) {
-    throw new Error(
-      `Request check failed: HTTP ${response.status}`
-    );
+    throw new Error(`Request check failed: HTTP ${response.status}`);
   }
-
   const data = (await response.json()) as CheckResponse;
-
-  if (
-    typeof data.allowed !== "boolean" ||
-    ![200, 429].includes(data.status)
-  ) {
+  if (typeof data.allowed !== "boolean" || ![200, 429].includes(data.status)) {
     throw new Error("Unexpected /check API response");
   }
-
   return data;
 }
-
-/** Test backend connectivity locally or in production. */
-
 export async function testBackendConnection() {
-  const response = await fetch(`${API_BASE}/metrics`, {
-    cache: "no-store",
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      `Backend returned HTTP ${response.status}`
-    );
-  }
-
-  return response.json();
+  return getMetrics();
 }

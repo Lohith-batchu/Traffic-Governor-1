@@ -1,5 +1,9 @@
-/** TrafficGovernor API client. The Vite proxy maps /backend/* to localhost:5001/*. */
-const API_BASE = "/backend";
+
+/** TrafficGovernor API client.
+ * Uses the Vite proxy locally and the deployed backend in production.
+ */
+
+const API_BASE = import.meta.env.VITE_API_BASE_URL || "/backend";
 
 export type BackendPolicy = {
   algorithm: "token_bucket" | "sliding_window";
@@ -64,36 +68,56 @@ export type CheckResponse = {
   algorithm: string;
   remaining: number | null;
   tokens_remaining: number | null;
-  retry_after_ms: number | null;
+  retry_after_ms?: number | null;
 };
 
-async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+async function apiJson<T>(
+  path: string,
+  init?: RequestInit
+): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     cache: "no-store",
     ...init,
   });
+
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     let detail = body.slice(0, 160);
+
     try {
       const parsed = JSON.parse(body);
       detail = parsed.error || parsed.message || detail;
-    } catch { /* A plain text error response is also valid. */ }
-    throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+    } catch {
+      /* A plain text error response is also valid. */
+    }
+
+    throw new Error(
+      `HTTP ${response.status}${detail ? `: ${detail}` : ""}`
+    );
   }
+
   return (await response.json()) as T;
 }
 
-export const getMetrics = () => apiJson<MetricsResponse>("/metrics");
-export const getPolicy = () => apiJson<BackendPolicy>("/policy");
+export const getMetrics = () =>
+  apiJson<MetricsResponse>("/metrics");
+
+export const getPolicy = () =>
+  apiJson<BackendPolicy>("/policy");
+
 export const getLogs = (offset = 0, limit = 100) =>
-  apiJson<LogsResponse>(`/logs?offset=${offset}&limit=${limit}`);
+  apiJson<LogsResponse>(
+    `/logs?offset=${offset}&limit=${limit}`
+  );
+
 export const getRole = async () => {
   const data = await apiJson<{ role: BackendRole }>("/role");
   return data.role;
 };
 
-export const savePolicy = (data: Partial<BackendPolicy> & Pick<BackendPolicy, "algorithm">) =>
+export const savePolicy = (
+  data: Partial<BackendPolicy> & Pick<BackendPolicy, "algorithm">
+) =>
   apiJson<BackendPolicy>("/policy", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -106,6 +130,7 @@ export const setBackendRole = async (role: BackendRole) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role }),
   });
+
   return result.role;
 };
 
@@ -117,26 +142,46 @@ export const resetClientMetrics = (client_id: string) =>
   });
 
 /** A 429 is a normal limiter decision, not a network error. */
-export async function checkRequest(clientId: string): Promise<CheckResponse> {
-  const response = await fetch(`${API_BASE}/check?client_id=${encodeURIComponent(clientId)}`, {
-    cache: "no-store",
-  });
+
+export async function checkRequest(
+  clientId: string
+): Promise<CheckResponse> {
+  const response = await fetch(
+    `${API_BASE}/check?client_id=${encodeURIComponent(clientId)}`,
+    {
+      cache: "no-store",
+    }
+  );
+
   if (response.status !== 200 && response.status !== 429) {
-    throw new Error(`Request check failed: HTTP ${response.status}`);
+    throw new Error(
+      `Request check failed: HTTP ${response.status}`
+    );
   }
+
   const data = (await response.json()) as CheckResponse;
-  if (typeof data.allowed !== "boolean" || ![200, 429].includes(data.status)) {
+
+  if (
+    typeof data.allowed !== "boolean" ||
+    ![200, 429].includes(data.status)
+  ) {
     throw new Error("Unexpected /check API response");
   }
+
   return data;
 }
 
+/** Test backend connectivity locally or in production. */
 
 export async function testBackendConnection() {
-  const response = await fetch("http://127.0.0.1:5001/metrics");
+  const response = await fetch(`${API_BASE}/metrics`, {
+    cache: "no-store",
+  });
 
   if (!response.ok) {
-    throw new Error(`Backend returned HTTP ${response.status}`);
+    throw new Error(
+      `Backend returned HTTP ${response.status}`
+    );
   }
 
   return response.json();

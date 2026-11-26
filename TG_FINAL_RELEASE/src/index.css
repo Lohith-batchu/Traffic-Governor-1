@@ -2383,12 +2383,82 @@ tbody tr:hover {
   white-space: nowrap;
 }
 
-body:not(.dark) .policy-scope-info {
+.app-shell.theme-light .policy-scope-info {
   background: #f8fafc;
   color: #1e293b;
   border-color: #dbe3ed;
 }
 
-body:not(.dark) .policy-scope-info p {
+.app-shell.theme-light .policy-scope-info p {
   color: #64748b;
 }
+
+/* Complete console-only dark theme: keep marketing and light mode unchanged. */
+.app-shell.theme-dark {
+  color-scheme: dark;
+  --console-inset: #112037;
+  --console-raised: #213650;
+  --console-text: #e7f1ff;
+  --console-muted: #b2c7e2;
+  --console-accent: #93c5fd;
+}
+.app-shell.theme-dark .content :is(.policy-visual, .policy-scope-info, .input-suffix span, .form-footer, .burst-summary, .waiting, .live-indicator, .sandbox, .tips-card code, .client-icon, .pagination button, .search-box) {
+  background: var(--console-inset);
+  color: var(--console-text);
+  border-color: var(--border);
+}
+.app-shell.theme-dark .content :is(.policy-visual span, .policy-visual p, .policy-visual small, .policy-scope-info p, .input-suffix span, .burst-summary div, .waiting, .chart-stats span, .legend, .preview-metric span, .result-strip span, .metric-summary span, .report-kpis span, .muted, .row-count, .pagination, .no-results, .y-label, .help-bar > div) {
+  color: var(--console-muted);
+}
+.app-shell.theme-dark .content :is(.callout, .algorithm.selected, .pagination button.active) {
+  background: #203b5d;
+  border-color: #527caf;
+  color: #dbeafe;
+}
+.app-shell.theme-dark .content :is(.kpi-icon, .kpi-icon.blue, .section-label > span, .recommended, .empty-console > div, .trip-label, .feature-icon, .explain-icon.token, .insight-icon.blue),
+.app-shell.theme-dark .notification-kind {
+  background: #203d65;
+  color: #93c5fd;
+}
+.app-shell.theme-dark .content :is(.kpi-icon.green, .status-live, .status-ok .status-icon, .status-live .status-icon, .policy-scope-badge, .safe-icon, .insight-icon.good, .explain-icon.window),
+.app-shell.theme-dark .notification-kind.simulation {
+  background: #183c34;
+  color: #86efac;
+  border-color: #376b54;
+}
+.app-shell.theme-dark .content :is(.kpi-icon.red, .status-bad .status-icon),
+.app-shell.theme-dark .notification-kind.limit {
+  background: #492a38;
+  color: #fda4af;
+}
+.app-shell.theme-dark .content :is(.kpi-icon.amber, .status-warn .status-icon, .incident-banner .incident-icon, .insight-icon.warn) {
+  background: #493b25;
+  color: #fcd68a;
+}
+.app-shell.theme-dark .content :is(.status-ok, .code-200, .allowed-result svg) { color: #86efac; }
+.app-shell.theme-dark .content :is(.status-bad, .code-429, .denied-result svg) { color: #fda4af; }
+.app-shell.theme-dark .content .status-warn,
+.app-shell.theme-dark .content .live-analysis-connection.offline { color: #fcd68a; }
+.app-shell.theme-dark .content .positive { color: #86efac !important; }
+.app-shell.theme-dark .content .negative { color: #fda4af !important; }
+.app-shell.theme-dark .content :is(.link-btn, .algorithm > svg, .burst-summary svg, .tips-card > svg, .guide li > span, .help-bar a, .help-bar > div svg) { color: var(--console-accent); }
+.app-shell.theme-dark .content :is(.policy-card dl div, .preview-metric, .result-strip, .result-strip > div) { border-color: var(--border); }
+.app-shell.theme-dark .content tbody tr:hover { background: #20354e; }
+.app-shell.theme-dark .content .gridline { stroke: #354b66; }
+.app-shell.theme-dark .content :is(.rate-cell > div, .live-analysis-stack) { background: #31465e; }
+.app-shell.theme-dark .content .demo-activity-bar { background: #713846; }
+.app-shell.theme-dark .content :is(input, textarea)::placeholder { color: #9aafc9; }
+.app-shell.theme-dark .content :is(input, select, textarea):focus { border-color: #93c5fd; }
+.app-shell.theme-dark .content .algorithm.selected .radio { border-color: #93c5fd; }
+.app-shell.theme-dark .content .pagination button:disabled { color: #8195ad; }
+.app-shell.theme-dark :is(.environment, .role-picker, .breadcrumb span) { color: var(--console-muted); }
+.app-shell.theme-dark :is(.search-trigger kbd, .avatar, .global-search-dialog, .global-search-input input, .global-search-results > button, .notification-panel .notification-read) {
+  background: var(--console-inset);
+  color: var(--console-text);
+  border-color: var(--border);
+}
+.app-shell.theme-dark :is(.global-search-input, .global-search-input button, .global-search-results small, .global-search-results > p, .global-search-hint, .notification-empty, .notification-empty strong) { color: var(--console-muted); }
+.app-shell.theme-dark :is(.global-search-results > button:hover, .global-search-results > button:focus-visible) { background: #203b5d; }
+.app-shell.theme-dark :is(.notification-panel-heading, .notification-footer) { border-color: var(--border); }
+.app-shell.theme-dark .icon-button[data-count]:after { border-color: #14233a; }
+/* The exported report images have a white plotting canvas; preserve readability. */

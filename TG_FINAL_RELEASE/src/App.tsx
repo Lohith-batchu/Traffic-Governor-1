@@ -1,4 +1,4 @@
-import { Component, useEffect, useMemo, useState } from "react";
+import { Component, useEffect, useMemo, useRef, useState } from "react";
 import "./enter-trafficgovernor.css";
 import {
   getMetrics, getPolicy, savePolicy as saveBackendPolicy, getLogs,
@@ -1586,13 +1586,13 @@ function MiniBurstDemo() {
   </div>;
 }
 
-function Landing({ onEnter }: { onEnter: () => void }) {
+function Landing({ onEnter, ready, retrying }: { onEnter: () => void; ready: boolean; retrying: boolean }) {
   const [showcaseTab,setShowcaseTab]=useState<ShowcaseTab>("Dashboard");
   const activeCopy=showcaseCopy[showcaseTab];
   return <div className="marketing-page">
     <div className="marketing-dark">
       <header className="marketing-nav"><SiteBrand dark/><nav aria-label="Landing navigation"><a href="#features">Features</a><a href="#how-it-works">How it works</a><a href="#about-product">About</a></nav><div className="marketing-nav-actions"><span className="tg-landing-status"><span className="hero-pulse" /> LOCAL DEMO</span></div></header>
-      <section className="marketing-hero"><div className="hero-copy"><div className="hero-eyebrow"><span className="hero-pulse"/> API TRAFFIC MANAGEMENT · LOCAL DEMO</div><h1>Keep your APIs reliable under <em>any traffic.</em></h1><p>Configure rate limits, simulate request bursts, and understand API traffic behavior — all from one clear control plane.</p><div className="hero-buttons"><button type="button" className="marketing-primary tg-enter-button" onClick={onEnter}><span>Enter TrafficGovernor</span><Icon name="arrow" size={20}/></button></div><div className="hero-metrics"><div><strong>128,492</strong><span>Sample requests</span></div><div><strong>94.83%</strong><span>Sample allowed</span></div><div><strong>84 ms</strong><span>Sample P95 latency</span></div></div></div><TrafficAnimation/></section>
+      <section className="marketing-hero"><div className="hero-copy"><div className="hero-eyebrow"><span className="hero-pulse"/> API TRAFFIC MANAGEMENT · LOCAL DEMO</div><h1>Keep your APIs reliable under <em>any traffic.</em></h1><p>Configure rate limits, simulate request bursts, and understand API traffic behavior — all from one clear control plane.</p><div className="hero-buttons"><button type="button" className="marketing-primary tg-enter-button" onClick={onEnter} disabled={!ready}><span>{ready ? "Enter TrafficGovernor" : "Connecting to backend..."}</span>{ready ? <Icon name="arrow" size={20}/> : <span className="tg-start-spinner" aria-hidden="true"/>}</button></div><p className={`tg-start-note ${ready ? "ready" : ""}`} role="status">{ready ? "Backend connected" : retrying ? "Server not ready yet. Retrying automatically..." : "Starting cloud backend. This may take a minute or more."}</p><div className="hero-metrics"><div><strong>128,492</strong><span>Sample requests</span></div><div><strong>94.83%</strong><span>Sample allowed</span></div><div><strong>84 ms</strong><span>Sample P95 latency</span></div></div></div><TrafficAnimation/></section>
       <div className="hero-bottom-line"/>
     </div>
     <section className="product-showcase" id="features"><div className="marketing-section-head"><span className="marketing-kicker">EXPLORE THE CONTROL PLANE</span><h2>One workspace. Clearer traffic decisions.</h2><p>Explore the tools you'll find inside your TrafficGovernor dashboard.</p></div><div className="showcase-tabs" role="tablist" aria-label="Product features">{(["Dashboard","Policy Settings","Traffic Simulator","Metrics"] as ShowcaseTab[]).map(tab=><button key={tab} role="tab" aria-selected={showcaseTab===tab} className={showcaseTab===tab?"active":""} onClick={()=>setShowcaseTab(tab)}>{tab}</button>)}</div><div className="showcase-layout"><div className="showcase-description"><span className="marketing-kicker">{activeCopy.eyebrow}</span><h3>{activeCopy.heading}</h3><p>{activeCopy.description}</p><p className="tg-preview-hint">Preview only · Enter TrafficGovernor above to use the live dashboard.</p></div><ProductPreview tab={showcaseTab}/></div></section>
@@ -1673,6 +1673,9 @@ export default function App() {
   const [metricsError, setMetricsError] = useState(false);
   const [analysisLogs, setAnalysisLogs] = useState<BackendLog[]>([]);
   const [policyLoaded, setPolicyLoaded] = useState(false);
+  const [startupReady, setStartupReady] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const refreshInFlight = useRef<Promise<boolean> | null>(null);
   useEffect(() => {
     try { localStorage.setItem("trafficgovernor_theme", theme); }
     catch { /* Theme remains usable for the current session. */ }
@@ -1717,7 +1720,7 @@ export default function App() {
     }
   }, [screen, page]);
 
-  async function refreshServerMetrics() {
+  async function fetchServerMetrics(): Promise<boolean> {
     try {
       const data = await getMetrics();
       setLiveMetrics(data);
@@ -1732,31 +1735,67 @@ export default function App() {
         setAnalysisLogs(fallbackLogs);
         setLogs(fallbackLogs.map(renderLog));
       }
+      return true;
     } catch (err) {
       console.error("Python metrics unavailable:", err);
       setLiveMetrics(null);
       setMetricsError(true);
       setLogs([]);
       setAnalysisLogs([]);
+      return false;
     }
+  }
+
+  // Share one metrics request so polling and manual refresh cannot overlap.
+  function refreshServerMetrics(): Promise<boolean> {
+    if (refreshInFlight.current) return refreshInFlight.current;
+    const pending = fetchServerMetrics().finally(() => {
+      refreshInFlight.current = null;
+    });
+    refreshInFlight.current = pending;
+    return pending;
   }
 
   useEffect(() => {
     let mounted = true;
-    const init = async () => {
+    let timer: number | undefined;
+    let initialized = false;
+    const tick = async () => {
       try {
-        const current = await getPolicy();
-        if (mounted) { setPolicy(fromBackendPolicy(current)); setPolicyLoaded(true); }
-      } catch (err) { console.error("Policy could not be loaded:", err); }
-      try {
-        const backendRole = await getRole();
-        if (mounted) { setRole(backendRole === "network_ops" ? "ops" : "engineer"); setRoleReady(true); }
-      } catch (err) { console.error("Role verification failed (read-only fallback):", err); }
+        const ok = await refreshServerMetrics();
+        if (!mounted) return;
+        if (!ok) {
+          initialized = false;
+          setStartupReady(false);
+          setRetrying(true);
+          setRoleReady(false);
+          setPolicyLoaded(false);
+        } else if (!initialized) {
+          const [current, backendRole] = await Promise.all([getPolicy(), getRole()]);
+          if (!mounted) return;
+          setPolicy(fromBackendPolicy(current));
+          setPolicyLoaded(true);
+          setRole(backendRole === "network_ops" ? "ops" : "engineer");
+          setRoleReady(true);
+          initialized = true;
+          setStartupReady(true);
+          setRetrying(false);
+        }
+      } catch (err) {
+        if (mounted) {
+          console.error("Backend initialization failed; retrying:", err);
+          initialized = false;
+          setStartupReady(false);
+          setRetrying(true);
+          setRoleReady(false);
+          setPolicyLoaded(false);
+        }
+      } finally {
+        if (mounted) timer = window.setTimeout(tick, 5000);
+      }
     };
-    void init();
-    void refreshServerMetrics();
-    const id = window.setInterval(() => void refreshServerMetrics(), 5000);
-    return () => { mounted = false; window.clearInterval(id); };
+    void tick();
+    return () => { mounted = false; window.clearTimeout(timer); };
   }, []);
 
   const changeRole = async (next: "engineer" | "ops") => {
@@ -1831,7 +1870,8 @@ export default function App() {
     setMobile(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
-  if (screen === "landing") return <Landing onEnter={() => { setPage("Dashboard"); setScreen("console"); }} />;
+  if (screen === "landing") return <Landing ready={startupReady} retrying={retrying} onEnter={() => { if (startupReady) { setPage("Dashboard"); setScreen("console"); } }} />;
+  if (!startupReady) return <div className="tg-start-screen" role="status"><span className="tg-start-spinner" aria-hidden="true"/><h1>Initializing TrafficGovernor</h1><p>{retrying ? "Backend unavailable. Retrying automatically..." : "Connecting to the Python backend..."}</p></div>;
   return (
     <div className={`app-shell ${theme === "dark" ? "theme-dark" : "theme-light"}`}>
       <aside className={mobile ? "open" : ""}>

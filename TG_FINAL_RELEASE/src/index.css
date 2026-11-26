@@ -2462,3 +2462,15 @@ tbody tr:hover {
 .app-shell.theme-dark :is(.notification-panel-heading, .notification-footer) { border-color: var(--border); }
 .app-shell.theme-dark .icon-button[data-count]:after { border-color: #14233a; }
 /* The exported report images have a white plotting canvas; preserve readability. */
+
+/* Cloud backend startup */
+.marketing-page .tg-enter-button:disabled { opacity: .75; cursor: wait; }
+.marketing-page .tg-start-note { color: #b6d2f5; font-size: 13px; margin: 10px 0; }
+.marketing-page .tg-start-note.ready { color: #86efac; }
+.tg-start-spinner { display: inline-block; width: 18px; height: 18px; border: 2px solid #94a3b8; border-top-color: #60a5fa; border-radius: 50%; animation: tg-start-spin .9s linear infinite; flex-shrink: 0; }
+@keyframes tg-start-spin { to { transform: rotate(360deg); } }
+.tg-start-screen { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 12px; padding: 24px; background: #0b172b; color: #e7f1ff; }
+.tg-start-screen .tg-start-spinner { width: 40px; height: 40px; }
+.tg-start-screen h1 { font-size: 24px; font-weight: 600; }
+.tg-start-screen p { color: #b6d2f5; }
+@media (prefers-reduced-motion: reduce) { .tg-start-spinner { animation: none; } }
